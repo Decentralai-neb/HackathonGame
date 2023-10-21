@@ -11,6 +11,8 @@ import {SafeMath} from "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "./libraries/Base64.sol";
 import "./interfaces/IDistributionPool.sol";
 
+import "./interfaces/IStone.sol";
+
 import "hardhat/console.sol";
 
 
@@ -20,28 +22,18 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
 
     // Event handling
     event TokensMinted(address indexed owner, uint256 amount);
-    event MinerStarted(string minerType, address indexed user, uint256 tokenId);
     event RewardClaimed(address indexed user, uint256 tokenId);
 
-    // mapping (address => address) public referrals;
-    // mapping (address => uint) public claimTokensRewarded;
-
-
-    // Pause minting or boosting
-    bool public minerPaused;
-
     // Miner counter
-    Counters.Counter private _btcMinerTokenIds;
+    Counters.Counter private _cryptoMinerTokenIds;
 
     // Miner supply control
-    uint256 public bitcoinMinerSupply = 2000;
+    uint256 public cryptoMinerSupply;
 
-    // Pricing 
+    // Pricing to pay for miner mint
     uint256 public cryptoMinerPrice;
-    uint256 public discountedPrice;
-    uint256 public burnAmount;
 
-    // Hashrate pricing
+    // Hashrate pricing to boost miner
     uint256 public minerBoostRate;
 
     // Used for calculating emission rate per block
@@ -59,23 +51,22 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
     TokenInfo[] public AllowedCrypto;
     mapping(uint256 => uint) public rates;
     address public dp; // distribution pool
-    // address public wm; // windmill contract
-    address public cm; // claim token contract
+    address public stone; // stone
 
     // Emission rates, can be modified by owner or controller
     uint256 public cryptoReward;
 
+    // Required materials to mint a miner
+    mapping (uint256 => uint256) public requiredMaterials;
+
     // Miner Data
     struct Miner {
-        string token; // Token being mined by miner
-        uint256 tokenId; // Token Id of miner
-        string name; // Name of miner set by owner
+        string name; // Name of miner
         uint256 hashrate; // Miner hashrate
-        string hashMeasured; // Hashrate measured in GH or TH
+        string hashMeasured; // Hashrate measured in VoxelHashes
         uint256 rewardPerBlock; // The miners earning per block
         uint lastUpdateBlock; // The last time a reward was claimed or when the miner began staking
         uint256 accumulated; // Unclaimed accumulated rewards left over before hashboost
-        uint256 dailyEstimate; // pending rewards for a miner
         string imageURI; // miner image
     }
 
@@ -84,17 +75,16 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
     mapping (address => uint) public minerMints; // Tracking of miners minted per user
 
     // Token mining global statistics
-    struct CryptoMiners {
-        uint256 minersHashing; // number of miners hashing
-        uint256 totalHashrate; // the total hashrate of all Bitcoin miners
-        uint256[] minerTokenIds; // Used for updating global emission rate data across all miners
-    }
-    CryptoMiners public cryptominer;
+    uint256[] public allMinerTokenIds;
+    uint256 public minersHashingAway;
     
 
-    constructor(
-        string[] memory minerImageURIs
+    constructor(uint256 _dailyBlocks, address _dp, address _stone
     ) ERC721("CryptoMiner", "MINER") {
+        dailyBlocks = _dailyBlocks;
+        dp = _dp;
+        stone = _stone;
+        requiredMaterials[1] = 10;
     }
 
     function walletOfOwner(address _owner)
@@ -114,8 +104,6 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
         Miner memory minerToken = miners[_tokenId];
 
         string memory strHashrate = Strings.toString(minerToken.hashrate);
-        string memory strBlckRwd = Strings.toString(minerToken.rewardPerBlock);
-
         string memory json = Base64.encode(
             abi.encodePacked(
                 '{"name": "',
@@ -124,8 +112,7 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
                 Strings.toString(_tokenId),
                 '", "description": "Mine more blocks with your Crypto Miner", "image": "',
                 minerToken.imageURI,
-                '", "attributes": [ { "trait_type": "Hashrate", "value": ',strHashrate,'}, { "trait_type": "Block Reward", "value": ',
-                strBlckRwd,'} ]}'
+                '", "attributes": [ { "trait_type": "Hashrate", "value": ',strHashrate,'}]}'
             )
         );
 
@@ -136,55 +123,43 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
         return output;
     }
 
-    // Pause minting and boosting
-    modifier whenBtcNotPaused() {
-        require(!minerPaused, "Bitcoin miner minting is paused");
-        _;
-    }
-
     // Mint a miner
-    function mintMiner(uint256 _pid, string memory _imageURI) public {
+    function mintMiner(uint256 _pid, string memory _imageURI) external {
 
         TokenInfo storage tokens = AllowedCrypto[_pid];
         IERC20 paytoken;
         paytoken = tokens.paytoken;
-        uint256 amount = 1;
         uint256 
             price = cryptoMinerPrice;
-            require(!minerPaused, "Bitcoin miner minting is paused"); // Check if Bitcoin minting is paused
-            require(cryptominer.minersHashing.add(amount) <= bitcoinMinerSupply, "Bitcoin miner supply exceeded");
+            require(cryptoMinerSupply <= 2500, "Crypto miner supply exceeded");
             require(paytoken.balanceOf(msg.sender) >= price, "Insufficient funds");
-            paytoken.transferFrom(msg.sender, address(this), price.mul(amount));
-            
+            paytoken.transferFrom(msg.sender, address(this), price.mul(1));
+            address user = msg.sender; // the address is a required parameter of the stone burn function
+            IStone(stone).burnStone(user, requiredMaterials[1]);
 
-            uint256 minerToken = _btcMinerTokenIds.current().add(1);
+            uint256 minerToken = _cryptoMinerTokenIds.current().add(1);
             minerMints[msg.sender]++;
             miners[minerToken] = Miner({
-                
-                tokenId: minerToken,
-                token: "Bitcoin", // Replace this with the appropriate token name
-                name: "JohnnyNewcome", // Miner name
+                name: "VoxelMiner", // Miner name
                 hashrate: initialHashrate, // Replace this with the appropriate hashrate
                 hashMeasured: "VH", // Measured in VoxelHashes
                 rewardPerBlock: initialHashrate.mul(cryptoReward), // Calculate the rewardPerBlock based on hashrate and cryptoReward
                 lastUpdateBlock: block.number, // Initialize the lastUpdateBlock with the current block
-                accumulated: 0,
-                dailyEstimate: initialHashrate.mul(cryptoReward).mul(dailyBlocks),
+                accumulated: 0,// used for calculating correct pending rewards if miner hashrate is increased before claiming rewards
                 imageURI: _imageURI
                 });
-                safeMintBtcMiner(msg.sender);
+                safeMintCryptoMiner(msg.sender);
 
-                cryptominer.minersHashing = cryptominer.minersHashing.add(amount);
-                cryptominer.minerTokenIds.push(minerToken);
-                cryptominer.totalHashrate = cryptominer.totalHashrate.add(initialHashrate.mul(amount));
-                bitcoinMinerSupply ++;
+                minersHashingAway.add(1);
+                allMinerTokenIds.push(minerToken);
+                cryptoMinerSupply ++;
         
     }
     // Boost a miners hashrate
     function boostMinerHash(uint256 tokenId, uint256 _pid) public {
         // Ensure the caller is the owner of the miner
         address owner = ownerOf(tokenId);
-        require(tokenId >= 1 && tokenId < 2000, "invalid token Id");
+        require(tokenId >= 1 && tokenId < 2500, "invalid token Id");
         require(msg.sender == owner, "Not the owner of the token");
         TokenInfo storage tokens = AllowedCrypto[_pid];
         IERC20 paytoken;
@@ -202,32 +177,11 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
             miner.hashrate = miner.hashrate.add(hsh);
             miner.rewardPerBlock = miner.hashrate.mul(cryptoReward);
             miner.lastUpdateBlock = block.number;
-            miner.dailyEstimate = miner.rewardPerBlock.mul(dailyBlocks);
-            cryptominer.totalHashrate = cryptominer.totalHashrate.add(1);
-    }
-
-    // Update the name of a miner
-    function updateMinerName(uint256 _tokenId, string memory _newName, uint256 _pid) public {
-        TokenInfo storage tokens = AllowedCrypto[_pid];
-        IERC20 paytoken;
-        paytoken = tokens.paytoken;
-        require(bytes(_newName).length <= 14, "Name exceeds 14 characters limit");
-
-        address owner = ownerOf(_tokenId);
-        require(owner != address(0), "Invalid token Id"); // Check if the token exists
-        require(msg.sender == owner, "Not the owner of the token");
-
-        // Deduct the boost cost from the sender's balance
-        require(paytoken.balanceOf(msg.sender) >= burnAmount, "Insufficient funds");
-        paytoken.transferFrom(msg.sender, address(0), burnAmount);
-
-        Miner storage miner = miners[_tokenId];
-        miner.name = _newName;
     }
 
 
     function claimRewards(uint256 tokenId) public {
-       require(tokenId >= 1 && tokenId < 13999, "invalid token Id");
+       require(tokenId >= 1 && tokenId < 2500, "invalid token Id");
         uint256 _pid = 0; // whatever the reward tokens id is
         address user = msg.sender; // the address is a required parameter of the pool contract
 
@@ -235,13 +189,13 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
         require(minerOwners[tokenId] == user, "Not the owner of the token");
         
         Miner storage miner = miners[tokenId];
-        // Distribute rewards to the user
+        // Get the pending rewards for the user
         uint256 rewards = getPendingRewards(tokenId); // Implement reward calculation
-        // Call the appropriate claim function in the DistributionPool contract based on minerType
+        // Call the appropriate claim function in the DistributionPool contract according to erc20 id
         IDistributionPool(dp).claim(user, _pid, rewards);
         
-        miner.accumulated = 0;
-        miner.lastUpdateBlock = block.number;
+        miner.accumulated = 0; // reset the miners accumulated rewards to 0
+        miner.lastUpdateBlock = block.number; // store the block number as the last update block for the miner
 
         // Emit an event or perform other actions as needed
         emit RewardClaimed(user, tokenId);
@@ -262,9 +216,9 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
 
     // Safemint
 
-    function safeMintBtcMiner(address to) internal {
-        uint256 tokenId = _btcMinerTokenIds.current().add(1);
-        _btcMinerTokenIds.increment();
+    function safeMintCryptoMiner(address to) internal {
+        uint256 tokenId = _cryptoMinerTokenIds.current().add(1);
+        _cryptoMinerTokenIds.increment();
         minerOwners[tokenId] = msg.sender;
         _safeMint(to, tokenId);
     }
@@ -289,13 +243,6 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
 
     // onlyOwner functions
 
-    // Initialize chest contract
-    function initializeDp(
-        address _dp
-        ) external onlyOwner {
-        dp = _dp;
-    }
-
     // Add an erc20 token to be used in the contract
     function addCurrency(
         IERC20 _paytoken, string memory _name
@@ -305,25 +252,6 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
                 paytoken: _paytoken, name: _name
             })
         );
-    }
-
-    // Update the token address and name for a specific id being used in the contract
-    function updateCurrency(uint256 _pid, IERC20 _newPaytoken, string memory _newName) public onlyOwner {
-        require(_pid < AllowedCrypto.length, "Invalid pid");
-        
-        TokenInfo storage tokenInfo = AllowedCrypto[_pid];
-        tokenInfo.paytoken = _newPaytoken;
-        tokenInfo.name = _newName;
-    }
-
-    // Function to update the claim token contract address if needed
-    function initializeCm(address _cm) public onlyOwner {
-        cm = _cm;
-    }
-
-    // Pause minting or boosting if necessary
-    function toggleMinerPaused() public onlyOwner {
-        minerPaused = !minerPaused;
     }
 
     // Set rate for PROSPECT token used to boost miner
@@ -340,14 +268,8 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
     function setGlobalHashrate(uint256 _hashrate) public onlyOwner {
         setHashrate = _hashrate;
     }
-    // Number of daily blocks, needs to be set
-    // This can be an estimate
-    // Also used in the setRewardEmissionRate function
-    function setDailyBlocks(uint256 _dBlocks) public onlyOwner {
-        dailyBlocks = _dBlocks;
-    }
 
-    // Set global emission rates for all miner tokens, using Stat structs to obtain tokenIds for each miner
+    // Set global emission rates for all miners, using Stat structs to obtain tokenIds for each miner
     // Reward emission rate
     
 
@@ -356,7 +278,7 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
 
         
 
-        uint256[] memory totalMinerTokenIds = cryptominer.minerTokenIds;
+        uint256[] memory totalMinerTokenIds = allMinerTokenIds;
 
         for (uint256 i = 0; i < totalMinerTokenIds.length; i++) {
             uint256 tokenId = totalMinerTokenIds[i];
@@ -368,7 +290,6 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
             cryptoReward = rewardsPerVH.div(dailyBlocks);
             // Calculate the rewardPerBlock with the token's precision
             miner.rewardPerBlock = cryptoReward.mul(miner.hashrate);
-            miner.dailyEstimate = miner.rewardPerBlock.mul(dailyBlocks);
 
         }
     }
@@ -383,11 +304,6 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
         cryptoMinerPrice = _price;
     }
 
-    // Set the amount of tokens to burn, used for updating your miners name
-    function setBurnAmount(uint256 _amount) public onlyOwner {
-        burnAmount = _amount;
-    }
-
     // Withdraw PROSPECT and other ERC20 tokens used in the contract
     function withdraw(uint256 _pid) public payable onlyOwner() {
             TokenInfo storage tokens = AllowedCrypto[_pid];
@@ -395,13 +311,5 @@ contract CryptoMiner is ERC721, ERC721Enumerable, Ownable {
             paytoken = tokens.paytoken;
             paytoken.transfer(msg.sender, paytoken.balanceOf(address(this)));
     }
-
-    // Withdraw Ethereum tokens
-    function withdraw() public onlyOwner {
-        uint amount = address(this).balance;
-
-        (bool success, ) = msg.sender.call{value: amount}("");
-        require(success,"Failed to withdraw");
-   }
 
 }
